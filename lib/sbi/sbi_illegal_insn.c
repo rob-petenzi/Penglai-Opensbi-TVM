@@ -8,11 +8,13 @@
  */
 
 #include <sbi/riscv_asm.h>
+#include <sbi/riscv_barrier.h>
 #include <sbi/riscv_encoding.h>
 #include <sbi/sbi_bitops.h>
 #include <sbi/sbi_emulate_csr.h>
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_illegal_insn.h>
+#include <sbi/sbi_pmu.h>
 #include <sbi/sbi_trap.h>
 #include <sbi/sbi_unpriv.h>
 #include <sbi/sbi_console.h>
@@ -32,12 +34,30 @@ static int truly_illegal_insn(ulong insn, struct sbi_trap_regs *regs)
 	return sbi_trap_redirect(regs, &trap);
 }
 
+static int misc_mem_opcode_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	/* Errata workaround: emulate `fence.tso` as `fence rw, rw`. */
+	if ((insn & INSN_MASK_FENCE_TSO) == INSN_MATCH_FENCE_TSO) {
+		smp_mb();
+		return 0;
+	}
+
+	return truly_illegal_insn(insn, regs);
+}
+
 static int system_opcode_insn(ulong insn, struct sbi_trap_regs *regs)
 {
 	int do_write, rs1_num = (insn >> 15) & 0x1f;
 	ulong rs1_val = GET_RS1(insn, regs);
 	int csr_num   = (u32)insn >> 20;
+	ulong prev_mode = (regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT;
 	ulong csr_val, new_csr_val;
+
+	if (prev_mode == PRV_M) {
+		sbi_printf("%s: Failed to access CSR %#x from M-mode",
+			__func__, csr_num);
+		return SBI_EFAIL;
+	}
 
 	/* TODO: Ensure that we got CSR read/write instruction */
 
@@ -80,11 +100,11 @@ static int system_opcode_insn(ulong insn, struct sbi_trap_regs *regs)
 	return 0;
 }
 
-static illegal_insn_func illegal_insn_table[32] = {
+static const illegal_insn_func illegal_insn_table[32] = {
 	truly_illegal_insn, /* 0 */
 	truly_illegal_insn, /* 1 */
 	truly_illegal_insn, /* 2 */
-	truly_illegal_insn, /* 3 */
+	misc_mem_opcode_insn, /* 3 */
 	truly_illegal_insn, /* 4 */
 	truly_illegal_insn, /* 5 */
 	truly_illegal_insn, /* 6 */
@@ -115,76 +135,27 @@ static illegal_insn_func illegal_insn_table[32] = {
 	truly_illegal_insn  /* 31 */
 };
 
-
-extern uintptr_t pt_area_base;
-extern uintptr_t pt_area_size;
-extern uintptr_t mbitmap_base;
-extern uintptr_t mbitmap_size;
-extern uintptr_t pgd_order;
-extern uintptr_t pmd_order;
-
 int sbi_illegal_insn_handler(ulong insn, struct sbi_trap_regs *regs)
 {
 	struct sbi_trap_info uptrap;
-	struct sbi_trap_info uptrap2;
-	ulong inst;
-	if (insn == 0)
-		inst = sbi_get_insn(regs->mepc, &uptrap2);
-	else
-		inst = insn;
-	
-	// Emulate the TVM
-	unsigned long mepc = regs->mepc;
-	/* Case1: write sptbr trapped by TVM */
-	if ((((inst>>20) & 0xfff) == 0x180)
-		&&((inst & 0x7f) == 0b1110011)
-		&& (((inst>>12) & 0x3) == 0b001))
-	{
-		// printm("here0 %d\r\n",((inst>>15) & 0x1f));
-		unsigned long val = *((unsigned long *)regs + ((inst>>15) & 0x1f));
-		unsigned long pa = (val & 0x3fffff)<<12;
-		bool enable_mmu = ((val >> 60) == 0x8);
-		if((pt_area_base < pa) && ((pt_area_base + (1<<pgd_order)*4096) > pa) && enable_mmu)
-		{
-			asm volatile ("csrrw x0, sptbr, %0":: "rK"(val));
-			csr_write(CSR_MEPC, mepc + 4);
-			regs->mepc = csr_read(CSR_MEPC);
-			return 0 ;
-		}
-	}
-	/* Case2: read sptbr trapped by TVM */
-	if((((inst>>20) & 0xfff) == 0x180)
-	&&((inst & 0x7f) == 0b1110011)
-	&& (((inst>>12) & 0x3) == 0b010))
-	{
-		// printm("here3 %d\r\n",((inst>>7) & 0x1f));
-		int idx = ((inst>>7) & 0x1f);
-		unsigned long __tmp;
-		asm volatile ("csrrs %0, sptbr, x0":"=r"(__tmp));
-		csr_write(CSR_MEPC, mepc + 4);
-		*((unsigned long *)regs + idx) = __tmp;
-		regs->mepc = csr_read(CSR_MEPC);
-		return 0 ;
-	}
-	/* Case3: sfence.vma trapped by TVM */
-	if((((inst>>25) & 0x7f) == 0b0001001)
-	&&((inst & 0x7fff) == 0b1110011))
-	{
-		// printm("here5 %d\r\n",((inst>>7) & 0x1f));
-		asm volatile ("sfence.vma");
-		csr_write(CSR_MEPC, mepc + 4);
-		regs->mepc = csr_read(CSR_MEPC);
-		return 0 ;
-	}
-	// End of the TVM trap handler 
 
+	/*
+	 * We only deal with 32-bit (or longer) illegal instructions. If we
+	 * see instruction is zero OR instruction is 16-bit then we fetch and
+	 * check the instruction encoding using unprivilege access.
+	 *
+	 * The program counter (PC) in RISC-V world is always 2-byte aligned
+	 * so handling only 32-bit (or longer) illegal instructions also help
+	 * the case where MTVAL CSR contains instruction address for illegal
+	 * instruction trap.
+	 */
+
+	sbi_pmu_ctr_incr_fw(SBI_PMU_FW_ILLEGAL_INSN);
 	if (unlikely((insn & 3) != 3)) {
-		if (insn == 0) {
-			insn = sbi_get_insn(regs->mepc, &uptrap);
-			if (uptrap.cause) {
-				uptrap.epc = regs->mepc;
-				return sbi_trap_redirect(regs, &uptrap);
-			}
+		insn = sbi_get_insn(regs->mepc, &uptrap);
+		if (uptrap.cause) {
+			uptrap.epc = regs->mepc;
+			return sbi_trap_redirect(regs, &uptrap);
 		}
 		if ((insn & 3) != 3)
 			return truly_illegal_insn(insn, regs);
