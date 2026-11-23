@@ -22,6 +22,7 @@
 #include <sbi/sbi_pmu.h>
 #include <sbi/sbi_string.h>
 #include <sbi/sbi_tlb.h>
+#include <sbi/sbi_pmp.h>
 
 struct sbi_ipi_data {
 	unsigned long ipi_type;
@@ -225,6 +226,44 @@ void sbi_ipi_set_device(const struct sbi_ipi_device *dev)
 		return;
 
 	ipi_dev = dev;
+}
+
+/** Process Penglai stop/destroy IPIs using the live enclave register frame. */
+void sbi_ipi_process_in_enclave(struct sbi_trap_regs* regs)
+{
+	unsigned long ipi_type;
+	unsigned int ipi_event;
+	const struct sbi_ipi_event_ops *ipi_ops;
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	struct sbi_ipi_data *ipi_data =
+			sbi_scratch_offset_ptr(scratch, ipi_data_off);
+
+	u32 hartid = current_hartid();
+	if (ipi_dev && ipi_dev->ipi_clear)
+		ipi_dev->ipi_clear(hartid);
+
+	ipi_type = atomic_raw_xchg_ulong(&ipi_data->ipi_type, 0);
+	ipi_event = 0;
+	while (ipi_type) {
+		if (!(ipi_type & 1UL))
+			goto skip;
+
+		ipi_ops = ipi_ops_array[ipi_event];
+		if ((!sbi_strcmp(ipi_ops->name, "IPI_STOP_ENCLAVE")) || (!sbi_strcmp(ipi_ops->name, "IPI_DESTROY_ENCLAVE")))
+		{
+			if (ipi_ops && ipi_ops->e_process)
+				ipi_ops->e_process(scratch, regs);
+		}
+		else
+		{
+			if (ipi_ops && ipi_ops->process)
+				ipi_ops->process(scratch);
+		}
+
+skip:
+		ipi_type = ipi_type >> 1;
+		ipi_event++;
+	};
 }
 
 int sbi_ipi_init(struct sbi_scratch *scratch, bool cold_boot)

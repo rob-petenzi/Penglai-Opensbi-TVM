@@ -44,6 +44,7 @@
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_scratch.h>
 #include <sbi/sbi_version.h>
+#include <sbi/sbi_pmp.h>
 
 struct sbi_domain_memregion;
 struct sbi_trap_info;

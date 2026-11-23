@@ -58,4 +58,6 @@ int sbi_console_init(struct sbi_scratch *scratch);
 		sbi_panic args; \
 } while (0)
 
+#define sbi_bug(fmt, ...) sbi_printf("[ERROR] "fmt, ##__VA_ARGS__)
+#define sbi_debug(fmt, ...) sbi_printf("[DEBUG] "fmt, ##__VA_ARGS__)
 #endif
