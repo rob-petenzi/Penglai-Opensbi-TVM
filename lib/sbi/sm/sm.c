@@ -478,9 +478,24 @@ int remap_mm_region(unsigned long paddr, unsigned long size)
  * \param pte_dest The location of pt entry in pt area
  * \param pte_src The content of pt entry
  */
+/*
+ * Pre-populate A/D bits on valid leaf PTEs written into the PMP-read-only
+ * pt_area so hardware page-table walkers with Svadu-style A/D updates (such as
+ * gem5) never attempt a store to pt_area and trigger a PMP access fault.
+ */
+inline uintptr_t normalize_pt_area_leaf_pte(uintptr_t pte_src)
+{
+  if ((pte_src & PTE_V) && (pte_src & (PTE_R | PTE_X))) {
+    pte_src |= PTE_A;
+    if (pte_src & PTE_W)
+      pte_src |= PTE_D;
+  }
+  return pte_src;
+}
+
 inline int set_single_pte(uintptr_t *pte_dest, uintptr_t pte_src)
 {
-  *pte_dest = pte_src;
+  *pte_dest = normalize_pt_area_leaf_pte(pte_src);
   
   return 0;
 }
@@ -829,6 +844,12 @@ uintptr_t sm_pt_area_separation(uintptr_t tmp_pgd_order, uintptr_t tmp_pmd_order
   {
     sbi_bug("M MODE: sm_pt_area_separation: check pt_area mapping is failed\n");
     return -1UL;
+  }
+  for (pte_t *p = (pte_t *)pt_area_base; p < (pte_t *)pt_area_end; ++p)
+  {
+    pte_t entry = *p;
+    if ((entry & PTE_V) && (entry & (PTE_R | PTE_X)))
+      *p = normalize_pt_area_leaf_pte(entry);
   }
   set_tvm_and_sync();
   return 0;

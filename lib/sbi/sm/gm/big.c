@@ -284,7 +284,10 @@ static u32 bn_digit_bits(u32 a)
 /** Divide multi-precision digits using normalized scratch operands. */
 void bn_div(u32 *a, u32 *b, u32 *c, u32 cdigits, u32 *d, u32 ddigits)
 {
-  u32 ai, t, cc[cdigits+1], dd[cdigits/2];
+  u32 ai, t;
+  u32 cc[cdigits + 1] __attribute__((aligned(8)));
+  u32 dd[cdigits / 2] __attribute__((aligned(8)));
+  u64 cc_window[ddigits / 2];
   u32 dddigits, shift;
   u64 tmp;
   int i;
@@ -310,10 +313,13 @@ void bn_div(u32 *a, u32 *b, u32 *c, u32 cdigits, u32 *d, u32 ddigits)
     }
 
     cc[i+dddigits] -= vli_sub_digit_mult(&cc[i], &cc[i], ai, dd, dddigits);
-    while(cc[i+dddigits] || (vli_cmp((u64*)&cc[i], (u64*)dd, dddigits/2) >= 0)){
+    /* Stage &cc[i] through an 8-byte aligned buffer so odd i never traps on ld/sd. */
+    __builtin_memcpy(cc_window, &cc[i], dddigits * sizeof(u32));
+    while(cc[i+dddigits] || (vli_cmp(cc_window, (u64*)dd, dddigits/2) >= 0)){
       ai++;
-      cc[i+dddigits] -= vli_sub((u64*)&cc[i], (u64*)&cc[i], (u64*)dd, dddigits/2);
+      cc[i+dddigits] -= vli_sub(cc_window, cc_window, (u64*)dd, dddigits/2);
     }
+    __builtin_memcpy(&cc[i], cc_window, dddigits * sizeof(u32));
     a[i] = ai;
   }
 
@@ -530,9 +536,9 @@ void vli_mmod_fast_nist_256(u64 *result, u64 *product, u64 *curve_prime, u8 ndig
 
 void vli_mmod_fast_sm2_256(u64 *result, u64 *_product, u64 *mod, u8 ndigits)
 {
-  u32 tmp1[8];
-  u32 tmp2[8];
-  u32 tmp3[8];
+  u32 tmp1[8] __attribute__((aligned(8)));
+  u32 tmp2[8] __attribute__((aligned(8)));
+  u32 tmp3[8] __attribute__((aligned(8)));
   u32 *product = (u32 *)_product;
   int carry = 0;
 

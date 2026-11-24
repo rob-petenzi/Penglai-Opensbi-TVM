@@ -25,6 +25,7 @@ static int sbi_ecall_penglai_handler(unsigned long extid, unsigned long funcid,
 {
   unsigned long *args = (unsigned long *)regs;
   uintptr_t arg0 = args[10], arg1 = args[11], arg2 = args[12], arg3 = args[13], arg4 = args[14], retval;
+  bool sync_trap_csrs = false;
   csr_write(CSR_MEPC, args[32] + 4);
   switch (funcid) {
     case SBI_SET_PTE:
@@ -35,6 +36,7 @@ static int sbi_ecall_penglai_handler(unsigned long extid, unsigned long funcid,
       break;
     case SBI_SM_PT_AREA_SEPARATION:
       retval = sm_pt_area_separation(arg0, arg1);
+      sync_trap_csrs = true;
       break;
     case SBI_SM_MAP_PTE:
       retval = sm_map_pte((uintptr_t *)arg0, (uintptr_t *)arg1);
@@ -47,15 +49,19 @@ static int sbi_ecall_penglai_handler(unsigned long extid, unsigned long funcid,
       break;
     case SBI_RUN_ENCLAVE:
       retval = sm_run_enclave(args, arg0, arg1);
+      sync_trap_csrs = true;
       break;
     case SBI_STOP_ENCLAVE:
       retval = sm_stop_enclave(args, arg0);
+      sync_trap_csrs = true;
       break;
     case SBI_RESUME_ENCLAVE:
       retval = sm_resume_enclave(args, arg0, arg1);
+      sync_trap_csrs = true;
       break;
     case SBI_DESTROY_ENCLAVE:
       retval = sm_destroy_enclave(args, arg0);
+      sync_trap_csrs = true;
       break;
     case SBI_ATTEST_ENCLAVE:
       retval = sm_attest_enclave(arg0, arg1, arg2);
@@ -68,15 +74,18 @@ static int sbi_ecall_penglai_handler(unsigned long extid, unsigned long funcid,
       break;
     case SBI_RUN_SHADOW_ENCLAVE:
       retval = sm_run_shadow_enclave(args, arg0, arg1);
+      sync_trap_csrs = true;
       break;
     case SBI_ATTEST_SHADOW_ENCLAVE:
       retval = sm_attest_shadow_enclave(arg0, arg1, arg2);
       break;
     case SBI_DESTROY_SHADOW_ENCLAVE:
       retval = sm_destroy_shadow_enclave(args, arg0);
+      sync_trap_csrs = true;
       break;
     case SBI_DESTROY_SERVER_ENCLAVE:
       retval = sm_destroy_server_enclave(args, arg0);
+      sync_trap_csrs = true;
       break;
     case SBI_SCHRODINGER_INIT:
       retval = sm_schrodinger_init(arg0, arg1);
@@ -88,8 +97,12 @@ static int sbi_ecall_penglai_handler(unsigned long extid, unsigned long funcid,
 	default:
 		retval = SBI_ENOTSUPP;
 	}
-  args[32] = csr_read(CSR_MEPC);
-  args[33] = csr_read(CSR_MSTATUS);
+  if (sync_trap_csrs) {
+    args[32] = csr_read(CSR_MEPC);
+    args[33] = csr_read(CSR_MSTATUS);
+  } else {
+    args[32] += 4;
+  }
   *out_val = retval;
 	return retval;
 }
