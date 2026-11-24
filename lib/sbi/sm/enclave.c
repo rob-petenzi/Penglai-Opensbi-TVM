@@ -921,6 +921,7 @@ int swap_from_host_to_enclave(uintptr_t* host_regs, struct enclave_t* enclave)
   //set mstatus to transfer control to u mode
   uintptr_t mstatus = csr_read(CSR_MSTATUS);
   mstatus = INSERT_FIELD(mstatus, MSTATUS_MPP, PRV_U);
+  mstatus = INSERT_FIELD(mstatus, MSTATUS_FS, 0x3);
   csr_write(CSR_MSTATUS, mstatus);
 
   //mark that cpu is in enclave world now
@@ -1285,7 +1286,7 @@ uintptr_t create_enclave(enclave_create_param_t create_args)
     enclave->shm_size = 0;
   }
   
-  // hash_enclave(enclave, (void*)(enclave->hash), 0);
+  hash_enclave(enclave, (void*)(enclave->hash), 0);
   copy_word_to_host((unsigned int*)create_args.eid_ptr, enclave->eid);
 
   //Sync and flush the remote TLB entry.
